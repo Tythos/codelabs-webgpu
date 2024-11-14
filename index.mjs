@@ -4,23 +4,34 @@
 
 import vertexShaderSource from "./src/basic.v.wgsl?raw";
 import fragmentShaderSource from "./src/basic.f.wgsl?raw";
+import computeShaderSource from "./src/basic.c.wgsl?raw";
 
 const GRID_SIZE = 32;
 const UPDATE_INTERVAL_MS = 200;
+const WORKGROUP_SIZE = 8;
 let ADAPTER_DEVICE = null;
 let CANVAS_CONTEXT = null;
 let CELL_PIPELINE = null;
+let SIMULATION_PIPELINE = null;
 let VERTEX_BUFFER = null;
 let BIND_GROUPS = null;
 let VERTEX_DATA = null;
 let STEP = 0;
 
 function updateGrid() {
+    const encoder = ADAPTER_DEVICE.createCommandEncoder();
+
+    // encode compute pass
+    const computePass = encoder.beginComputePass();
+    computePass.setPipeline(SIMULATION_PIPELINE);
+    computePass.setBindGroup(0, BIND_GROUPS[STEP % 2]);
+    const workgroupCount = Math.ceil(GRID_SIZE / WORKGROUP_SIZE);
+    computePass.dispatchWorkgroups(workgroupCount, workgroupCount);
+    computePass.end();
     STEP += 1;
 
     // encode render pass
-    const encoder = ADAPTER_DEVICE.createCommandEncoder();
-    const pass = encoder.beginRenderPass({
+    const renderPass = encoder.beginRenderPass({
         "colorAttachments": [{
             "view": CANVAS_CONTEXT.getCurrentTexture().createView(),
             "loadOp": "clear",
@@ -28,11 +39,13 @@ function updateGrid() {
             "storeOp": "store"
         }]
     });
-    pass.setPipeline(CELL_PIPELINE);
-    pass.setBindGroup(0, BIND_GROUPS[STEP % 2]);
-    pass.setVertexBuffer(0, VERTEX_BUFFER);
-    pass.draw(VERTEX_DATA.length / 2, GRID_SIZE * GRID_SIZE);
-    pass.end();
+    renderPass.setPipeline(CELL_PIPELINE);
+    renderPass.setBindGroup(0, BIND_GROUPS[STEP % 2]);
+    renderPass.setVertexBuffer(0, VERTEX_BUFFER);
+    renderPass.draw(VERTEX_DATA.length / 2, GRID_SIZE * GRID_SIZE);
+    renderPass.end();
+
+    // finalize command encoding
     const commandBuffer = encoder.finish();
     ADAPTER_DEVICE.queue.submit([commandBuffer]);
 }
@@ -95,7 +108,7 @@ async function main() {
     const cellStateArray = new Uint32Array(GRID_SIZE * GRID_SIZE);
     const cellStateStorage = [
         ADAPTER_DEVICE.createBuffer({
-            "label": "Cell State",
+            "label": "Cell State A",
             "size": cellStateArray.byteLength,
             "usage": GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
         }),
@@ -105,14 +118,10 @@ async function main() {
             "usage": GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
         })
     ];
-    for (let i = 0; i < cellStateArray.length; i += 3) {
-        cellStateArray[i] = 1;
+    for (let i = 0; i < cellStateArray.length; i += 1) {
+        cellStateArray[i] = Math.random() > 0.6 ? 1 : 0;
     }
     ADAPTER_DEVICE.queue.writeBuffer(cellStateStorage[0], 0, cellStateArray);
-    for (let i = 0; i < cellStateArray.length; i += 1) {
-        cellStateArray[i] = i % 2;
-    }
-    ADAPTER_DEVICE.queue.writeBuffer(cellStateStorage[1], 0, cellStateArray);
 
     // define/compile shader programs
     const cellShaderModule = ADAPTER_DEVICE.createShaderModule({
@@ -122,11 +131,39 @@ async function main() {
             fragmentShaderSource
         ].join("\n")
     });
+    const simulationShaderModule = ADAPTER_DEVICE.createShaderModule({
+        "label": "Game of Life simulation shader",
+        "code": [
+            computeShaderSource
+        ].join("\n")
+    });
 
-    // define pipeline from program and buffers
+    // define binding layouts
+    const bindGroupLayout = ADAPTER_DEVICE.createBindGroupLayout({
+        "label": "Cell Bind Group Layout",
+        "entries": [{
+            "binding": 0,
+            "visibility": GPUShaderStage.VERTEX | GPUShaderStage.COMPUTE | GPUShaderStage.FRAGMENT,
+            "buffer": {}
+        }, {
+            "binding": 1,
+            "visibility": GPUShaderStage.VERTEX | GPUShaderStage.COMPUTE,
+            "buffer": { "type": "read-only-storage" }
+        }, {
+            "binding": 2,
+            "visibility": GPUShaderStage.COMPUTE,
+            "buffer": { "type": "storage" }
+        }]
+    });
+    const pipelineLayout = ADAPTER_DEVICE.createPipelineLayout({
+        "label": "Cell Pipeline Layout",
+        "bindGroupLayouts": [bindGroupLayout]
+    });
+        
+    // define pipelines from program and buffers
     CELL_PIPELINE = ADAPTER_DEVICE.createRenderPipeline({
         "label": "Cell pipeline",
-        "layout": "auto",
+        "layout": pipelineLayout,
         "vertex": {
             "module": cellShaderModule,
             "entryPoint": "vertexMain",
@@ -140,29 +177,43 @@ async function main() {
             }]
         }
     });
+    SIMULATION_PIPELINE = ADAPTER_DEVICE.createComputePipeline({
+        "label": "Simulation pipeline",
+        "layout": pipelineLayout,
+        "compute": {
+            "module": simulationShaderModule,
+            "entryPoint": "computeMain"
+        }
+    });
 
     // define pipeline bindings
     BIND_GROUPS = [
         ADAPTER_DEVICE.createBindGroup({
             "label": "Cell renderer bind group A",
-            "layout": CELL_PIPELINE.getBindGroupLayout(0),
+            "layout": bindGroupLayout,
             "entries": [{
                 "binding": 0,
                 "resource": { "buffer": uniformBuffer }
             }, {
                 "binding": 1,
                 "resource": { "buffer": cellStateStorage[0] }
+            }, {
+                "binding": 2,
+                "resource": { "buffer": cellStateStorage[1] }
             }]
         }),
         ADAPTER_DEVICE.createBindGroup({
             "label": "Cell renderer bind group B",
-            "layout": CELL_PIPELINE.getBindGroupLayout(0),
+            "layout": bindGroupLayout,
             "entries": [{
                 "binding": 0,
                 "resource": { "buffer": uniformBuffer }
             }, {
                 "binding": 1,
                 "resource": { "buffer": cellStateStorage[1] }
+            }, {
+                "binding": 2,
+                "resource": { "buffer": cellStateStorage[0] }
             }]
         })
     ];
