@@ -5,6 +5,8 @@
 import vertexShaderSource from "./src/basic.v.wgsl?raw";
 import fragmentShaderSource from "./src/basic.f.wgsl?raw";
 
+const GRID_SIZE = 32;
+
 async function main() {
     // assert support, resolve adapter device
     if (!window.navigator.gpu) {
@@ -49,6 +51,13 @@ async function main() {
             "shaderLocation": 0
         }]
     };
+    const uniformArray = new Float32Array([GRID_SIZE, GRID_SIZE]);
+    const uniformBuffer = device.createBuffer({
+        "label": "Grid Uniforms",
+        "size": uniformArray.byteLength,
+        "usage": GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    device.queue.writeBuffer(uniformBuffer, 0, uniformArray);
 
     // define/compile shader programs
     const cellShaderModule = device.createShaderModule({
@@ -59,7 +68,7 @@ async function main() {
         ].join("\n")
     });
 
-    // define pipeline with render pass
+    // define pipeline from program and buffers
     const cellPipeline = device.createRenderPipeline({
         "label": "Cell pipeline",
         "layout": "auto",
@@ -76,6 +85,18 @@ async function main() {
             }]
         }
     });
+
+    // define pipeline bindings
+    const bindGroup = device.createBindGroup({
+        "label": "Cell renderer bind group",
+        "layout": cellPipeline.getBindGroupLayout(0),
+        "entries": [{
+            "binding": 0,
+            "resource": { "buffer": uniformBuffer }
+        }]
+    });
+
+    // encode render pass
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginRenderPass({
         "colorAttachments": [{
@@ -87,7 +108,8 @@ async function main() {
     });
     pass.setPipeline(cellPipeline);
     pass.setVertexBuffer(0, vertexBuffer);
-    pass.draw(vertices.length / 2);
+    pass.setBindGroup(0, bindGroup);
+    pass.draw(vertices.length / 2, GRID_SIZE * GRID_SIZE);
     pass.end();
     const commandBuffer = encoder.finish();
     device.queue.submit([commandBuffer]);
